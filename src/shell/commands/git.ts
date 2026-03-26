@@ -748,7 +748,7 @@ async function ensureRemoteBranchExists(
   gh: { owner: string; repo: string },
   token: string,
   branch: string,
-): Promise<{ ok: true; sha: string | null } | { ok: false; result: ShellResult }> {
+): Promise<{ ok: true; sha: string } | { ok: false; result: ShellResult }> {
   const refResp = await githubApi(`/repos/${gh.owner}/${gh.repo}/git/ref/heads/${branch}`, token);
   if (refResp.ok) {
     return { ok: true, sha: refResp.data.object.sha };
@@ -813,14 +813,7 @@ async function ensureRemoteBranchExists(
     };
   }
 
-  const retryRefResp = await githubApi(`/repos/${gh.owner}/${gh.repo}/git/ref/heads/${branch}`, token);
-  if (!retryRefResp.ok) {
-    return {
-      ok: false,
-      result: fail(`fatal: failed to resolve remote ref refs/heads/${branch}: ${retryRefResp.data?.message}\n`, 128),
-    };
-  }
-  return { ok: true, sha: retryRefResp.data.object.sha };
+  return { ok: true, sha: defaultRefResp.data.object.sha };
 }
 
 /* ------------------------------------------------------------------ */
@@ -1958,7 +1951,7 @@ async function gitPush(args: string[], ctx: ShellContext): Promise<ShellResult> 
 
   const ensuredRef = await ensureRemoteBranchExists(gh, token, remoteBranch);
   if (!ensuredRef.ok) return ensuredRef.result;
-  let parentSha = ensuredRef.sha;
+  const parentSha = ensuredRef.sha;
 
   const commitTree = repo.getCommitTree(headHash);
   const blobShas: Map<string, string> = new Map();
@@ -1986,33 +1979,23 @@ async function gitPush(args: string[], ctx: ShellContext): Promise<ShellResult> 
   if (!treeResp.ok) return fail(`fatal: failed to create tree: ${treeResp.data?.message}\n`, 128);
 
   const commit = repo.readCommit(headHash);
-  const commitBody: any = {
+  const commitResp = await githubApi(`/repos/${gh.owner}/${gh.repo}/git/commits`, token, "POST", {
     message: commit?.message ?? "Push from nodepod",
     tree: treeResp.data.sha,
-  };
-  if (parentSha) commitBody.parents = [parentSha];
-
-  const commitResp = await githubApi(`/repos/${gh.owner}/${gh.repo}/git/commits`, token, "POST", commitBody);
+    parents: [parentSha],
+  });
   if (!commitResp.ok) return fail(`fatal: failed to create commit: ${commitResp.data?.message}\n`, 128);
 
-  if (parentSha) {
-    const force = args.includes("-f") || args.includes("--force");
-    const updateResp = await githubApi(
-      `/repos/${gh.owner}/${gh.repo}/git/refs/heads/${remoteBranch}`,
-      token,
-      "PATCH",
-      { sha: commitResp.data.sha, force },
-    );
-    if (!updateResp.ok) return fail(`fatal: failed to update ref: ${updateResp.data?.message}\n`, 128);
-  } else {
-    const createResp = await githubApi(`/repos/${gh.owner}/${gh.repo}/git/refs`, token, "POST", {
-      ref: `refs/heads/${remoteBranch}`,
-      sha: commitResp.data.sha,
-    });
-    if (!createResp.ok) return fail(`fatal: failed to create ref: ${createResp.data?.message}\n`, 128);
-  }
+  const force = args.includes("-f") || args.includes("--force");
+  const updateResp = await githubApi(
+    `/repos/${gh.owner}/${gh.repo}/git/refs/heads/${remoteBranch}`,
+    token,
+    "PATCH",
+    { sha: commitResp.data.sha, force },
+  );
+  if (!updateResp.ok) return fail(`fatal: failed to update ref: ${updateResp.data?.message}\n`, 128);
 
-  return ok(`To ${remoteUrl}\n   ${(parentSha ?? "000000").slice(0, 7)}..${commitResp.data.sha.slice(0, 7)}  ${localBranch} -> ${remoteBranch}\n`);
+  return ok(`To ${remoteUrl}\n   ${parentSha.slice(0, 7)}..${commitResp.data.sha.slice(0, 7)}  ${localBranch} -> ${remoteBranch}\n`);
 }
 
 async function gitPull(args: string[], ctx: ShellContext): Promise<ShellResult> {
