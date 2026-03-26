@@ -81,24 +81,24 @@ describe("git command", () => {
     return { shell, fetchMock };
   }
 
-  it("bootstraps an empty remote before the first push", async () => {
-    let refCallCount = 0;
-
+  it("creates an orphan commit when pushing to an empty remote", async () => {
     const { shell, fetchMock } = setupAndStub((url, method) => {
       if (url.endsWith("/git/ref/heads/main") && method === "GET") {
-        refCallCount++;
-        if (refCallCount === 1) {
-          return jsonResponse({ message: "Not Found" }, 404);
-        }
-        return jsonResponse({ object: { sha: "remote-head-sha" } });
+        return jsonResponse({ message: "Not Found" }, 404);
       }
-      if (url.endsWith(`/repos/${REPO}`) && method === "GET") {
-        return jsonResponse({ default_branch: "main" });
+      if (url.endsWith("/git/refs") && method === "POST") {
+        return jsonResponse({ ref: "refs/heads/main" }, 201);
       }
-      if (url.endsWith("/contents/.gitkeep") && method === "PUT") {
-        return jsonResponse({ content: { path: ".gitkeep" } }, 201);
+      if (url.endsWith("/git/blobs") && method === "POST") {
+        return jsonResponse({ sha: "blob-sha" }, 201);
       }
-      return pushRoutes(url, method);
+      if (url.endsWith("/git/trees") && method === "POST") {
+        return jsonResponse({ sha: "push-tree-sha" }, 201);
+      }
+      if (url.endsWith("/git/commits") && method === "POST") {
+        return jsonResponse({ sha: "push-commit-sha" }, 201);
+      }
+      return undefined;
     });
     await initRepo(shell);
 
@@ -108,18 +108,22 @@ describe("git command", () => {
     expect(pushResult.stderr).toBe("");
     expect(pushResult.stdout).toContain("main -> main");
 
+    // Should create the ref via POST, not PATCH
     expect(fetchMock).toHaveBeenCalledWith(
-      `${API}/git/ref/heads/main`,
-      expect.objectContaining({ method: "GET" }),
+      `${API}/git/refs`,
+      expect.objectContaining({ method: "POST" }),
     );
-    expect(fetchMock).toHaveBeenCalledWith(
+    // Should NOT have bootstrapped with .gitkeep
+    expect(fetchMock).not.toHaveBeenCalledWith(
       `${API}/contents/.gitkeep`,
-      expect.objectContaining({ method: "PUT" }),
+      expect.anything(),
     );
-    expect(fetchMock).toHaveBeenCalledWith(
-      `${API}`,
-      expect.objectContaining({ method: "GET" }),
+    // Commit should have no parents (orphan)
+    const commitCall = fetchMock.mock.calls.find(
+      ([u, opts]) => String(u).endsWith("/git/commits") && opts?.method === "POST",
     );
+    const commitBody = JSON.parse(String(commitCall![1]!.body));
+    expect(commitBody.parents).toBeUndefined();
   });
 
   it("pushes directly when the remote branch already exists", async () => {
@@ -136,13 +140,16 @@ describe("git command", () => {
     expect(pushResult.exitCode).toBe(0);
     expect(pushResult.stdout).toContain("main -> main");
 
-    expect(fetchMock).not.toHaveBeenCalledWith(
-      `${API}/contents/.gitkeep`,
-      expect.anything(),
+    // Should update via PATCH, not create via POST
+    expect(fetchMock).toHaveBeenCalledWith(
+      `${API}/git/refs/heads/main`,
+      expect.objectContaining({ method: "PATCH" }),
     );
-    expect(fetchMock).not.toHaveBeenCalledWith(
-      `${API}`,
-      expect.objectContaining({ method: "GET" }),
+    // Commit should have the existing SHA as parent
+    const commitCall = fetchMock.mock.calls.find(
+      ([u, opts]) => String(u).endsWith("/git/commits") && opts?.method === "POST",
     );
+    const commitBody = JSON.parse(String(commitCall![1]!.body));
+    expect(commitBody.parents).toEqual(["existing-sha"]);
   });
 });

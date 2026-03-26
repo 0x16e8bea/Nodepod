@@ -744,11 +744,11 @@ async function githubApi(
   return { ok: resp.ok, status: resp.status, data };
 }
 
-async function ensureRemoteBranchExists(
+async function resolveRemoteRef(
   gh: { owner: string; repo: string },
   token: string,
   branch: string,
-): Promise<{ ok: true; sha: string } | { ok: false; result: ShellResult }> {
+): Promise<{ ok: true; sha: string | null } | { ok: false; result: ShellResult }> {
   const refResp = await githubApi(`/repos/${gh.owner}/${gh.repo}/git/ref/heads/${branch}`, token);
   if (refResp.ok) {
     return { ok: true, sha: refResp.data.object.sha };
@@ -757,63 +757,13 @@ async function ensureRemoteBranchExists(
   const remoteIsEmpty =
     /git repository is empty/i.test(refMessage) ||
     refResp.status === 409;
-  if (refResp.status !== 404 && !remoteIsEmpty) {
-    return {
-      ok: false,
-      result: fail(`fatal: failed to resolve remote ref refs/heads/${branch}: ${refResp.data?.message}\n`, 128),
-    };
+  if (refResp.status === 404 || remoteIsEmpty) {
+    return { ok: true, sha: null };
   }
-
-  const repoResp = await githubApi(`/repos/${gh.owner}/${gh.repo}`, token);
-  if (!repoResp.ok) {
-    return {
-      ok: false,
-      result: fail(`fatal: failed to read remote repository: ${repoResp.data?.message}\n`, 128),
-    };
-  }
-  const defaultBranch = repoResp.data?.default_branch || "main";
-
-  const initResp = await githubApi(
-    `/repos/${gh.owner}/${gh.repo}/contents/.gitkeep`,
-    token,
-    "PUT",
-    {
-      message: `Initialize ${defaultBranch}`,
-      content: "",
-      branch: defaultBranch,
-    },
-  );
-  if (!initResp.ok && initResp.status !== 422) {
-    return {
-      ok: false,
-      result: fail(`fatal: failed to initialize empty repository: ${initResp.data?.message}\n`, 128),
-    };
-  }
-
-  const defaultRefResp = await githubApi(`/repos/${gh.owner}/${gh.repo}/git/ref/heads/${defaultBranch}`, token);
-  if (!defaultRefResp.ok) {
-    return {
-      ok: false,
-      result: fail(`fatal: failed to resolve remote ref refs/heads/${defaultBranch}: ${defaultRefResp.data?.message}\n`, 128),
-    };
-  }
-
-  if (branch === defaultBranch) {
-    return { ok: true, sha: defaultRefResp.data.object.sha };
-  }
-
-  const createResp = await githubApi(`/repos/${gh.owner}/${gh.repo}/git/refs`, token, "POST", {
-    ref: `refs/heads/${branch}`,
-    sha: defaultRefResp.data.object.sha,
-  });
-  if (!createResp.ok && createResp.status !== 422) {
-    return {
-      ok: false,
-      result: fail(`fatal: failed to create initial ref: ${createResp.data?.message}\n`, 128),
-    };
-  }
-
-  return { ok: true, sha: defaultRefResp.data.object.sha };
+  return {
+    ok: false,
+    result: fail(`fatal: failed to resolve remote ref refs/heads/${branch}: ${refResp.data?.message}\n`, 128),
+  };
 }
 
 /* ------------------------------------------------------------------ */
@@ -1949,9 +1899,9 @@ async function gitPush(args: string[], ctx: ShellContext): Promise<ShellResult> 
   const headHash = repo.resolveHEAD();
   if (!headHash) return fail("fatal: nothing to push\n", 128);
 
-  const ensuredRef = await ensureRemoteBranchExists(gh, token, remoteBranch);
-  if (!ensuredRef.ok) return ensuredRef.result;
-  const parentSha = ensuredRef.sha;
+  const remoteRef = await resolveRemoteRef(gh, token, remoteBranch);
+  if (!remoteRef.ok) return remoteRef.result;
+  const parentSha = remoteRef.sha;
 
   const commitTree = repo.getCommitTree(headHash);
   const blobShas: Map<string, string> = new Map();
@@ -1979,23 +1929,33 @@ async function gitPush(args: string[], ctx: ShellContext): Promise<ShellResult> 
   if (!treeResp.ok) return fail(`fatal: failed to create tree: ${treeResp.data?.message}\n`, 128);
 
   const commit = repo.readCommit(headHash);
-  const commitResp = await githubApi(`/repos/${gh.owner}/${gh.repo}/git/commits`, token, "POST", {
+  const commitBody: any = {
     message: commit?.message ?? "Push from nodepod",
     tree: treeResp.data.sha,
-    parents: [parentSha],
-  });
+  };
+  if (parentSha) commitBody.parents = [parentSha];
+
+  const commitResp = await githubApi(`/repos/${gh.owner}/${gh.repo}/git/commits`, token, "POST", commitBody);
   if (!commitResp.ok) return fail(`fatal: failed to create commit: ${commitResp.data?.message}\n`, 128);
 
-  const force = args.includes("-f") || args.includes("--force");
-  const updateResp = await githubApi(
-    `/repos/${gh.owner}/${gh.repo}/git/refs/heads/${remoteBranch}`,
-    token,
-    "PATCH",
-    { sha: commitResp.data.sha, force },
-  );
-  if (!updateResp.ok) return fail(`fatal: failed to update ref: ${updateResp.data?.message}\n`, 128);
+  if (parentSha) {
+    const force = args.includes("-f") || args.includes("--force");
+    const updateResp = await githubApi(
+      `/repos/${gh.owner}/${gh.repo}/git/refs/heads/${remoteBranch}`,
+      token,
+      "PATCH",
+      { sha: commitResp.data.sha, force },
+    );
+    if (!updateResp.ok) return fail(`fatal: failed to update ref: ${updateResp.data?.message}\n`, 128);
+  } else {
+    const createResp = await githubApi(`/repos/${gh.owner}/${gh.repo}/git/refs`, token, "POST", {
+      ref: `refs/heads/${remoteBranch}`,
+      sha: commitResp.data.sha,
+    });
+    if (!createResp.ok) return fail(`fatal: failed to create ref: ${createResp.data?.message}\n`, 128);
+  }
 
-  return ok(`To ${remoteUrl}\n   ${parentSha.slice(0, 7)}..${commitResp.data.sha.slice(0, 7)}  ${localBranch} -> ${remoteBranch}\n`);
+  return ok(`To ${remoteUrl}\n   ${(parentSha ?? "0000000").slice(0, 7)}..${commitResp.data.sha.slice(0, 7)}  ${localBranch} -> ${remoteBranch}\n`);
 }
 
 async function gitPull(args: string[], ctx: ShellContext): Promise<ShellResult> {
