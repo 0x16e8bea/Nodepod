@@ -744,6 +744,85 @@ async function githubApi(
   return { ok: resp.ok, status: resp.status, data };
 }
 
+async function ensureRemoteBranchExists(
+  gh: { owner: string; repo: string },
+  token: string,
+  branch: string,
+): Promise<{ ok: true; sha: string | null } | { ok: false; result: ShellResult }> {
+  const refResp = await githubApi(`/repos/${gh.owner}/${gh.repo}/git/ref/heads/${branch}`, token);
+  if (refResp.ok) {
+    return { ok: true, sha: refResp.data.object.sha };
+  }
+  const refMessage = typeof refResp.data?.message === "string" ? refResp.data.message : "";
+  const remoteIsEmpty =
+    /git repository is empty/i.test(refMessage) ||
+    refResp.status === 409;
+  if (refResp.status !== 404 && !remoteIsEmpty) {
+    return {
+      ok: false,
+      result: fail(`fatal: failed to resolve remote ref refs/heads/${branch}: ${refResp.data?.message}\n`, 128),
+    };
+  }
+
+  const repoResp = await githubApi(`/repos/${gh.owner}/${gh.repo}`, token);
+  if (!repoResp.ok) {
+    return {
+      ok: false,
+      result: fail(`fatal: failed to read remote repository: ${repoResp.data?.message}\n`, 128),
+    };
+  }
+  const defaultBranch = repoResp.data?.default_branch || "main";
+
+  const initResp = await githubApi(
+    `/repos/${gh.owner}/${gh.repo}/contents/.gitkeep`,
+    token,
+    "PUT",
+    {
+      message: `Initialize ${defaultBranch}`,
+      content: "",
+      branch: defaultBranch,
+    },
+  );
+  if (!initResp.ok && initResp.status !== 422) {
+    return {
+      ok: false,
+      result: fail(`fatal: failed to initialize empty repository: ${initResp.data?.message}\n`, 128),
+    };
+  }
+
+  const defaultRefResp = await githubApi(`/repos/${gh.owner}/${gh.repo}/git/ref/heads/${defaultBranch}`, token);
+  if (!defaultRefResp.ok) {
+    return {
+      ok: false,
+      result: fail(`fatal: failed to resolve remote ref refs/heads/${defaultBranch}: ${defaultRefResp.data?.message}\n`, 128),
+    };
+  }
+
+  if (branch === defaultBranch) {
+    return { ok: true, sha: defaultRefResp.data.object.sha };
+  }
+
+  const createResp = await githubApi(`/repos/${gh.owner}/${gh.repo}/git/refs`, token, "POST", {
+    ref: `refs/heads/${branch}`,
+    sha: defaultRefResp.data.object.sha,
+  });
+  if (!createResp.ok && createResp.status !== 422) {
+    return {
+      ok: false,
+      result: fail(`fatal: failed to create initial ref: ${createResp.data?.message}\n`, 128),
+    };
+  }
+
+  const retryRefResp = await githubApi(`/repos/${gh.owner}/${gh.repo}/git/ref/heads/${branch}`, token);
+  if (!retryRefResp.ok) {
+    return {
+      ok: false,
+      result: fail(`fatal: failed to resolve remote ref refs/heads/${branch}: ${retryRefResp.data?.message}\n`, 128),
+    };
+  }
+  return { ok: true, sha: retryRefResp.data.object.sha };
+}
+
 /* ------------------------------------------------------------------ */
 /*  Find .git directory                                                */
 /* ------------------------------------------------------------------ */
@@ -1877,6 +1956,10 @@ async function gitPush(args: string[], ctx: ShellContext): Promise<ShellResult> 
   const headHash = repo.resolveHEAD();
   if (!headHash) return fail("fatal: nothing to push\n", 128);
 
+  const ensuredRef = await ensureRemoteBranchExists(gh, token, remoteBranch);
+  if (!ensuredRef.ok) return ensuredRef.result;
+  let parentSha = ensuredRef.sha;
+
   const commitTree = repo.getCommitTree(headHash);
   const blobShas: Map<string, string> = new Map();
 
@@ -1901,10 +1984,6 @@ async function gitPush(args: string[], ctx: ShellContext): Promise<ShellResult> 
     tree: treeEntries,
   });
   if (!treeResp.ok) return fail(`fatal: failed to create tree: ${treeResp.data?.message}\n`, 128);
-
-  let parentSha: string | null = null;
-  const refResp = await githubApi(`/repos/${gh.owner}/${gh.repo}/git/ref/heads/${remoteBranch}`, token);
-  if (refResp.ok) parentSha = refResp.data.object.sha;
 
   const commit = repo.readCommit(headHash);
   const commitBody: any = {
