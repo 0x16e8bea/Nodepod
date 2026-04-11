@@ -171,13 +171,13 @@ export function makeSystemError(
 
 /**
  * Permission check callback for volume-level access control.
- * Return `true` to allow the operation, `false` to deny (throws EACCES).
- * When null, all operations are allowed.
+ * Return `true` to allow, `'deny'` for EACCES, `'hide'` for ENOENT
+ * (file appears not to exist). When null, all operations are allowed.
  */
 export type VolumePermissionCheck = (
   path: string,
   op: 'read' | 'write' | 'list' | 'stat' | 'delete',
-) => boolean;
+) => true | 'deny' | 'hide';
 
 export class MemoryVolume {
   private tree: VolumeNode;
@@ -214,9 +214,11 @@ export class MemoryVolume {
   }
 
   private checkPermission(path: string, op: 'read' | 'write' | 'list' | 'stat' | 'delete', syscall: string): void {
-    if (this._permissionCheck && !this._permissionCheck(path, op)) {
-      throw makeSystemError('EACCES', syscall, path);
-    }
+    if (!this._permissionCheck) return;
+    const result = this._permissionCheck(path, op);
+    if (result === true) return;
+    if (result === 'hide') throw makeSystemError('ENOENT', syscall, path);
+    throw makeSystemError('EACCES', syscall, path);
   }
 
   // ---- Event subscription ----
@@ -666,11 +668,11 @@ export class MemoryVolume {
     if (!node) throw makeSystemError('ENOENT', 'scandir', p);
     if (node.kind !== 'directory') throw makeSystemError('ENOTDIR', 'scandir', p);
     const entries = Array.from(node.children!.keys());
-    // If a permission check is active, filter out entries the caller can't stat
+    // If a permission check is active, filter out hidden entries
     if (this._permissionCheck) {
       return entries.filter((name) => {
         const childPath = norm === '/' ? `/${name}` : `${norm}/${name}`;
-        return this._permissionCheck!(childPath, 'stat');
+        return this._permissionCheck!(childPath, 'stat') !== 'hide';
       });
     }
     return entries;
