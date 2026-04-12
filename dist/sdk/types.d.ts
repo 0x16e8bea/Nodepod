@@ -15,6 +15,13 @@ export interface NodepodOptions {
     /** domains allowed through the cors proxy. merged with built-in defaults
      *  (npm, github, esm.sh etc). pass null to allow everything */
     allowedFetchDomains?: string[] | null;
+    /**
+     * External MemoryVolume to use instead of creating one internally.
+     * When provided, NodePod uses this volume for all filesystem operations.
+     * The caller retains ownership and can enforce permissions, fire events,
+     * or share the same volume across multiple consumers.
+     */
+    volume?: import("../memory-volume").MemoryVolume;
 }
 export interface TerminalTheme {
     background?: string;

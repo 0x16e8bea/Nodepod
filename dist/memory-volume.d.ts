@@ -60,7 +60,13 @@ export interface SystemError extends Error {
     syscall: string;
     path?: string;
 }
-export declare function makeSystemError(code: 'ENOENT' | 'ENOTDIR' | 'EISDIR' | 'EEXIST' | 'ENOTEMPTY', syscall: string, targetPath: string, detail?: string): SystemError;
+export declare function makeSystemError(code: 'ENOENT' | 'ENOTDIR' | 'EISDIR' | 'EEXIST' | 'ENOTEMPTY' | 'EACCES', syscall: string, targetPath: string, detail?: string): SystemError;
+/**
+ * Permission check callback for volume-level access control.
+ * Return `true` to allow, `'deny'` for EACCES, `'hide'` for ENOENT
+ * (file appears not to exist). When null, all operations are allowed.
+ */
+export type VolumePermissionCheck = (path: string, op: 'read' | 'write' | 'list' | 'stat' | 'delete') => true | 'deny' | 'hide';
 export declare class MemoryVolume {
     private tree;
     private textEncoder;
@@ -68,7 +74,17 @@ export declare class MemoryVolume {
     private activeWatchers;
     private subscribers;
     private _handler;
+    private _permissionCheck;
     constructor(handler?: MemoryHandler | null);
+    /**
+     * Set a permission check callback. While active, every filesystem
+     * operation is checked before execution. If the callback returns false,
+     * the operation throws EACCES.
+     */
+    setPermissionCheck(check: VolumePermissionCheck): void;
+    /** Clear the permission check callback (all operations allowed). */
+    clearPermissionCheck(): void;
+    private checkPermission;
     on(event: 'change', handler: FileChangeHandler): this;
     on(event: 'delete', handler: FileDeleteHandler): this;
     off(event: 'change', handler: FileChangeHandler): this;
