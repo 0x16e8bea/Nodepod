@@ -2,7 +2,7 @@
 
 Object.defineProperties(exports, { __esModule: { value: true }, [Symbol.toStringTag]: { value: 'Module' } });
 
-const index = require('./index-BjugjCyV.cjs');
+const index = require('./index-CqpyZv7Q.cjs');
 
 
 
@@ -14,6 +14,7 @@ exports.MemoryVolume = index.MemoryVolume;
 exports.Nodepod = index.Nodepod;
 exports.NodepodFS = index.NodepodFS;
 exports.NodepodProcess = index.NodepodProcess;
+exports.NodepodShell = index.NodepodShell;
 exports.NodepodTerminal = index.NodepodTerminal;
 exports.ProcessHandle = index.ProcessHandle;
 exports.ProcessManager = index.ProcessManager;

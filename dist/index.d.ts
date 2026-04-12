@@ -69,7 +69,10 @@ export declare function createWorkspace(config?: WorkspaceConfig): {
     on: (event: string, listener: (...args: unknown[]) => void) => void;
 };
 export default createWorkspace;
+export { NodepodShell } from "./shell/shell-interpreter";
+export type { ShellResult, ShellCommand, ShellContext, BuiltinFn, } from "./shell/shell-types";
 export { Nodepod } from "./sdk/nodepod";
+export type { MainThreadShellHandle } from "./sdk/nodepod";
 export { NodepodTerminal } from "./sdk/nodepod-terminal";
 export { NodepodProcess } from "./sdk/nodepod-process";
 export { NodepodFS } from "./sdk/nodepod-fs";
