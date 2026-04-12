@@ -28,6 +28,15 @@ import {
 import { SyncChannelController } from "../threading/sync-channel";
 import { MemoryHandler } from "../memory-handler";
 import { openSnapshotCache } from "../persistence/idb-cache";
+import { NodepodShell } from "../shell/shell-interpreter";
+import type { ShellResult } from "../shell/shell-types";
+
+export interface MainThreadShellHandle {
+  /** The shell interpreter running on the main thread. */
+  shell: NodepodShell;
+  /** Kill the active worker-delegated process (e.g. node server.js). No-op if idle. */
+  killActiveProcess: () => void;
+}
 
 export class Nodepod {
   readonly fs: NodepodFS;
@@ -323,7 +332,89 @@ export class Nodepod {
 
   /* ---- createTerminal() ---- */
 
-  createTerminal(opts: TerminalOptions): NodepodTerminal {
+  createTerminal(
+    opts: TerminalOptions,
+    mainThreadShell?: MainThreadShellHandle,
+  ): NodepodTerminal {
+    if (mainThreadShell) {
+      return this._createTerminalWithMainThreadShell(opts, mainThreadShell);
+    }
+    return this._createTerminalWithWorker(opts);
+  }
+
+  /**
+   * Terminal backed by a main-thread NodepodShell.
+   * Builtins run synchronously; worker-delegated commands (node, npm)
+   * block until the worker process exits.
+   */
+  private _createTerminalWithMainThreadShell(
+    opts: TerminalOptions,
+    handle: MainThreadShellHandle,
+  ): NodepodTerminal {
+    const terminal = new NodepodTerminal(opts);
+    const { shell, killActiveProcess } = handle;
+    terminal.setCwd(shell.getCwd());
+
+    let activeAbort: AbortController | null = null;
+
+    terminal._wireExecution({
+      onCommand: async (cmd: string) => {
+        const myAbort = new AbortController();
+        activeAbort = myAbort;
+
+        terminal.write("\r\n");
+
+        // Abort kills the active worker-delegated process (if any)
+        myAbort.signal.addEventListener(
+          "abort",
+          () => killActiveProcess(),
+          { once: true },
+        );
+
+        try {
+          const result = await shell.exec(cmd);
+
+          if (!myAbort.signal.aborted) {
+            if (result.stdout) terminal._writeOutput(result.stdout);
+            if (result.stderr) terminal._writeOutput(result.stderr, true);
+          }
+        } catch (e) {
+          if (!myAbort.signal.aborted) {
+            const msg = e instanceof Error ? e.message : String(e);
+            terminal._writeOutput(`Error: ${msg}\n`, true);
+          }
+        } finally {
+          if (activeAbort === myAbort) activeAbort = null;
+
+          // Sync cwd changes (cd)
+          const newCwd = shell.getCwd();
+          if (newCwd !== terminal.getCwd()) {
+            this._cwd = newCwd;
+            terminal.setCwd(newCwd);
+          }
+
+          if (!myAbort.signal.aborted) {
+            terminal._setRunning(false);
+            terminal._writePrompt();
+          }
+        }
+      },
+
+      getSendStdin: () => null,
+      getIsStdinRaw: () => false,
+      getActiveAbort: () => activeAbort,
+      setActiveAbort: (ac) => {
+        activeAbort = ac;
+      },
+    });
+
+    return terminal;
+  }
+
+  /**
+   * Terminal backed by a persistent shell worker (original behavior).
+   */
+  private _createTerminalWithWorker(opts: TerminalOptions): NodepodTerminal {
     const terminal = new NodepodTerminal(opts);
     terminal.setCwd(this._cwd);
 
@@ -509,6 +600,82 @@ export class Nodepod {
     });
 
     return terminal;
+  }
+
+  /* ---- createMainThreadShell() ---- */
+
+  /**
+   * Create a shell interpreter that runs on the main thread, directly
+   * against the real MemoryVolume. Builtins (cat, grep, ls, etc.) execute
+   * synchronously with zero message-passing overhead. Commands that need
+   * worker isolation (node, npm, npx, etc.) are automatically delegated
+   * to workers via spawn().
+   *
+   * Use this when the shell needs direct access to main-thread state
+   * (e.g. database connections, UI state, custom registered commands).
+   */
+  createMainThreadShell(opts?: { cwd?: string }): MainThreadShellHandle {
+    const shell = new NodepodShell(this._volume, {
+      cwd: opts?.cwd ?? this._cwd,
+    });
+
+    let activeProcess: NodepodProcess | null = null;
+
+    // Commands that need worker isolation. Each delegates to spawn()
+    // and waits for the worker process to complete.
+    const workerCommands = [
+      "node",
+      "npm",
+      "npx",
+      "pnpm",
+      "yarn",
+      "bun",
+      "bunx",
+    ];
+
+    for (const name of workerCommands) {
+      shell.registerCommand({
+        name,
+        execute: async (args, ctx): Promise<ShellResult> => {
+          const proc = await this.spawn(name, args, {
+            cwd: ctx.cwd,
+            env: ctx.env,
+          });
+          activeProcess = proc;
+          try {
+            return await proc.completion;
+          } finally {
+            if (activeProcess === proc) activeProcess = null;
+          }
+        },
+      });
+    }
+
+    // SpawnChildCallback for PATH-resolved scripts — the shell uses this
+    // when it finds an executable on PATH that isn't a builtin or
+    // registered command. Delegates to a worker via spawn().
+    shell.setSpawnChildCallback(async (command, args, spawnOpts) => {
+      const proc = await this.spawn(command, args, {
+        cwd: spawnOpts?.cwd,
+        env: spawnOpts?.env,
+      });
+      activeProcess = proc;
+      try {
+        return {
+          pid: 0,
+          ...(await proc.completion),
+        };
+      } finally {
+        if (activeProcess === proc) activeProcess = null;
+      }
+    });
+
+    return {
+      shell,
+      killActiveProcess: () => {
+        activeProcess?.kill();
+      },
+    };
   }
 
   /* ---- setPreviewScript() ---- */

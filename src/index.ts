@@ -156,9 +156,20 @@ export function createWorkspace(config?: WorkspaceConfig): {
 
 export default createWorkspace;
 
+/* ---- Shell (main-thread usage) ---- */
+
+export { NodepodShell } from "./shell/shell-interpreter";
+export type {
+  ShellResult,
+  ShellCommand,
+  ShellContext,
+  BuiltinFn,
+} from "./shell/shell-types";
+
 /* ---- SDK (clean public API) ---- */
 
 export { Nodepod } from "./sdk/nodepod";
+export type { MainThreadShellHandle } from "./sdk/nodepod";
 export { NodepodTerminal } from "./sdk/nodepod-terminal";
 export { NodepodProcess } from "./sdk/nodepod-process";
 export { NodepodFS } from "./sdk/nodepod-fs";
