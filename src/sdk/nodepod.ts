@@ -160,7 +160,8 @@ export class Nodepod {
 
     const handler = new MemoryHandler(opts.memory);
     handler.startMonitoring();
-    const volume = new MemoryVolume(handler);
+    // Use caller-provided volume if given, otherwise create a fresh one.
+    const volume = opts.volume ?? new MemoryVolume(handler);
 
     // Open IDB snapshot cache for faster re-boots (opt-out via enableSnapshotCache: false)
     let snapshotCache = null;
