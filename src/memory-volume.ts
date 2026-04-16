@@ -136,7 +136,7 @@ export interface SystemError extends Error {
 }
 
 export function makeSystemError(
-  code: 'ENOENT' | 'ENOTDIR' | 'EISDIR' | 'EEXIST' | 'ENOTEMPTY',
+  code: 'ENOENT' | 'ENOTDIR' | 'EISDIR' | 'EEXIST' | 'ENOTEMPTY' | 'EACCES',
   syscall: string,
   targetPath: string,
   detail?: string
@@ -147,6 +147,7 @@ export function makeSystemError(
     EISDIR: -21,
     EEXIST: -17,
     ENOTEMPTY: -39,
+    EACCES: -13,
   };
 
   const descriptions: Record<string, string> = {
@@ -155,6 +156,7 @@ export function makeSystemError(
     EISDIR: 'is a directory',
     EEXIST: 'file already exists',
     ENOTEMPTY: 'directory not empty',
+    EACCES: 'permission denied',
   };
 
   const err = new Error(
@@ -167,6 +169,16 @@ export function makeSystemError(
   return err;
 }
 
+/**
+ * Permission check callback for volume-level access control.
+ * Return `true` to allow, `'deny'` for EACCES, `'hide'` for ENOENT
+ * (file appears not to exist). When null, all operations are allowed.
+ */
+export type VolumePermissionCheck = (
+  path: string,
+  op: 'read' | 'write' | 'list' | 'stat' | 'delete',
+) => true | 'deny' | 'hide';
+
 export class MemoryVolume {
   private tree: VolumeNode;
   private textEncoder = new TextEncoder();
@@ -174,6 +186,7 @@ export class MemoryVolume {
   private activeWatchers = new Map<string, Set<ActiveWatcher>>();
   private subscribers = new Map<string, Set<VolumeEventHandler>>();
   private _handler: MemoryHandler | null;
+  private _permissionCheck: VolumePermissionCheck | null = null;
 
   constructor(handler?: MemoryHandler | null) {
     this._handler = handler ?? null;
@@ -182,6 +195,30 @@ export class MemoryVolume {
       children: new Map(),
       modified: Date.now(),
     };
+  }
+
+  // ---- Permission enforcement ----
+
+  /**
+   * Set a permission check callback. While active, every filesystem
+   * operation is checked before execution. If the callback returns false,
+   * the operation throws EACCES.
+   */
+  setPermissionCheck(check: VolumePermissionCheck): void {
+    this._permissionCheck = check;
+  }
+
+  /** Clear the permission check callback (all operations allowed). */
+  clearPermissionCheck(): void {
+    this._permissionCheck = null;
+  }
+
+  private checkPermission(path: string, op: 'read' | 'write' | 'list' | 'stat' | 'delete', syscall: string): void {
+    if (!this._permissionCheck) return;
+    const result = this._permissionCheck(path, op);
+    if (result === true) return;
+    if (result === 'hide') throw makeSystemError('ENOENT', syscall, path);
+    throw makeSystemError('EACCES', syscall, path);
   }
 
   // ---- Event subscription ----
@@ -451,6 +488,7 @@ export class MemoryVolume {
 
   // expects pre-normalized path
   private writeInternal(norm: string, data: string | Uint8Array, notify: boolean): void {
+    this.checkPermission(norm, 'write', 'open');
     const lastSlash = norm.lastIndexOf('/');
     const parentPath = lastSlash <= 0 ? '/' : norm.slice(0, lastSlash);
     const name = norm.slice(lastSlash + 1);
@@ -486,6 +524,7 @@ export class MemoryVolume {
 
   statSync(p: string): FileStat {
     const norm = this.normalize(p);
+    this.checkPermission(norm, 'stat', 'stat');
 
     if (this._handler) {
       const cached = this._handler.statCache.get(norm);
@@ -580,6 +619,7 @@ export class MemoryVolume {
   readFileSync(p: string, encoding: 'utf8' | 'utf-8'): string;
   readFileSync(p: string, encoding?: 'utf8' | 'utf-8'): Uint8Array | string {
     const norm = this.normalize(p);
+    this.checkPermission(norm, 'read', 'open');
     const node = this.locate(norm);
     if (!node) throw makeSystemError('ENOENT', 'open', p);
     if (node.kind !== 'file') throw makeSystemError('EISDIR', 'read', p);
@@ -598,6 +638,7 @@ export class MemoryVolume {
 
   mkdirSync(p: string, options?: { recursive?: boolean }): void {
     const norm = this.normalize(p);
+    this.checkPermission(norm, 'write', 'mkdir');
 
     if (options?.recursive) {
       this.ensureDir(norm);
@@ -622,14 +663,24 @@ export class MemoryVolume {
 
   readdirSync(p: string): string[] {
     const norm = this.normalize(p);
+    this.checkPermission(norm, 'list', 'scandir');
     const node = this.locate(norm);
     if (!node) throw makeSystemError('ENOENT', 'scandir', p);
     if (node.kind !== 'directory') throw makeSystemError('ENOTDIR', 'scandir', p);
-    return Array.from(node.children!.keys());
+    const entries = Array.from(node.children!.keys());
+    // If a permission check is active, filter out hidden entries
+    if (this._permissionCheck) {
+      return entries.filter((name) => {
+        const childPath = norm === '/' ? `/${name}` : `${norm}/${name}`;
+        return this._permissionCheck!(childPath, 'stat') !== 'hide';
+      });
+    }
+    return entries;
   }
 
   unlinkSync(p: string): void {
     const norm = this.normalize(p);
+    this.checkPermission(norm, 'delete', 'unlink');
     const parentPath = this.parentOf(norm);
     const name = this.nameOf(norm);
 
@@ -649,6 +700,7 @@ export class MemoryVolume {
 
   rmdirSync(p: string): void {
     const norm = this.normalize(p);
+    this.checkPermission(norm, 'delete', 'rmdir');
     const parentPath = this.parentOf(norm);
     const name = this.nameOf(norm);
 
