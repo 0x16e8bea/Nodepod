@@ -174,6 +174,9 @@ export function tokenize(
 ): Token[] {
   const tokens: Token[] = [];
   let i = 0;
+  // After a heredoc operator is tokenized, the body lines must be skipped
+  // when the tokenizer reaches the newline at the end of the command line.
+  let heredocPendingSkipTo: number | null = null;
 
   while (i < input.length) {
     if (input[i] === " " || input[i] === "\t") {
@@ -184,6 +187,10 @@ export function tokenize(
     if (input[i] === "\n") {
       tokens.push({ type: "newline", value: "\n" });
       i++;
+      if (heredocPendingSkipTo !== null) {
+        i = heredocPendingSkipTo;
+        heredocPendingSkipTo = null;
+      }
       continue;
     }
 
@@ -211,6 +218,92 @@ export function tokenize(
     }
 
     if (input[i] === "<") {
+      // Heredoc: << or <<-
+      if (input[i + 1] === "<") {
+        i += 2;
+        let stripTabs = false;
+        if (i < input.length && input[i] === "-") {
+          stripTabs = true;
+          i++;
+        }
+
+        // Skip whitespace between << and delimiter
+        while (i < input.length && (input[i] === " " || input[i] === "\t")) i++;
+
+        // Read delimiter, handling optional quotes
+        let delimiter = "";
+        let quoted = false;
+        if (i < input.length && (input[i] === "'" || input[i] === '"')) {
+          quoted = true;
+          const q = input[i++];
+          while (i < input.length && input[i] !== q) delimiter += input[i++];
+          if (i < input.length) i++; // skip closing quote
+        } else {
+          while (
+            i < input.length &&
+            input[i] !== " " && input[i] !== "\t" &&
+            input[i] !== "\n" && input[i] !== "|" &&
+            input[i] !== ";" && input[i] !== "&" &&
+            input[i] !== ">" && input[i] !== "<"
+          ) {
+            delimiter += input[i++];
+          }
+        }
+
+        if (!delimiter) {
+          // Malformed — fall back to two redirect-ins
+          tokens.push({ type: "redirect-in", value: "<" });
+          tokens.push({ type: "redirect-in", value: "<" });
+          continue;
+        }
+
+        // Find the newline that ends the current command line
+        const nlIdx = input.indexOf("\n", i);
+        if (nlIdx === -1) {
+          // No body possible — emit empty heredoc
+          tokens.push({ type: "heredoc", value: "" });
+          continue;
+        }
+
+        // Scan body starting after that newline
+        let body = "";
+        let scanIdx = nlIdx + 1;
+        let foundEnd = false;
+
+        while (scanIdx <= input.length) {
+          let lineEnd = input.indexOf("\n", scanIdx);
+          if (lineEnd === -1) lineEnd = input.length;
+
+          const rawLine = input.slice(scanIdx, lineEnd);
+          const checkLine = stripTabs ? rawLine.replace(/^\t+/, "") : rawLine;
+
+          if (checkLine === delimiter) {
+            foundEnd = true;
+            heredocPendingSkipTo = lineEnd < input.length ? lineEnd + 1 : lineEnd;
+            break;
+          }
+
+          body += (stripTabs ? rawLine.replace(/^\t+/, "") : rawLine) + "\n";
+          scanIdx = lineEnd + 1;
+          if (scanIdx > input.length) break;
+        }
+
+        if (!foundEnd) {
+          // Unterminated heredoc — use remaining input as body
+          heredocPendingSkipTo = input.length;
+        }
+
+        // Expand variables in body for unquoted delimiters
+        if (!quoted) {
+          body = expandVariables(body, env, lastExit);
+        }
+
+        tokens.push({ type: "heredoc", value: body });
+        // i stays after the delimiter name — rest of the line is tokenized normally
+        continue;
+      }
+
+      // Single < — existing redirect-in
       tokens.push({ type: "redirect-in", value: "<" });
       i++;
       continue;
@@ -338,6 +431,15 @@ class Parser {
         const operator: ListOperator =
           op.type === "and" ? "&&" : op.type === "or" ? "||" : ";";
         entries.push({ pipeline, next: operator });
+      } else if (op.type === "newline") {
+        // Newlines separate commands like ; in bash
+        this.advance();
+        this.skipNewlines();
+        if (this.peek().type === "eof") {
+          entries.push({ pipeline });
+          break;
+        }
+        entries.push({ pipeline, next: ";" });
       } else {
         entries.push({ pipeline });
         break;
@@ -402,6 +504,12 @@ class Parser {
       if (tok.type === "redirect-2to1") {
         this.advance();
         redirects.push({ type: "stderr-to-stdout", target: "" });
+        continue;
+      }
+
+      if (tok.type === "heredoc") {
+        this.advance();
+        redirects.push({ type: "heredoc", target: tok.value });
         continue;
       }
 

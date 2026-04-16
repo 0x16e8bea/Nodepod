@@ -202,3 +202,62 @@ describe("expandGlob", () => {
     expect(matches).toEqual(sorted);
   });
 });
+
+describe("heredoc tokenization", () => {
+  it("produces a heredoc token with body content", () => {
+    const tokens = tokenize("cat << EOF\nhello world\nEOF", ENV, 0);
+    const heredoc = tokens.find((t) => t.type === "heredoc");
+    expect(heredoc).toBeDefined();
+    expect(heredoc!.value).toBe("hello world\n");
+  });
+
+  it("handles quoted delimiter (no variable expansion)", () => {
+    const tokens = tokenize("cat << 'EOF'\n$FOO\nEOF", ENV, 0);
+    const heredoc = tokens.find((t) => t.type === "heredoc");
+    expect(heredoc).toBeDefined();
+    expect(heredoc!.value).toBe("$FOO\n");
+  });
+
+  it("expands variables in unquoted heredoc", () => {
+    const tokens = tokenize("cat << EOF\n$FOO\nEOF", ENV, 0);
+    const heredoc = tokens.find((t) => t.type === "heredoc");
+    expect(heredoc).toBeDefined();
+    expect(heredoc!.value).toBe("bar\n");
+  });
+
+  it("handles <<- with tab stripping", () => {
+    const tokens = tokenize("cat <<-EOF\n\thello\n\tEOF", ENV, 0);
+    const heredoc = tokens.find((t) => t.type === "heredoc");
+    expect(heredoc).toBeDefined();
+    expect(heredoc!.value).toBe("hello\n");
+  });
+
+  it("preserves pipe tokens after heredoc on same line", () => {
+    const tokens = tokenize("cat << EOF | grep hello\nhello world\ngoodbye\nEOF", ENV, 0);
+    expect(tokens.some((t) => t.type === "heredoc")).toBe(true);
+    expect(tokens.some((t) => t.type === "pipe")).toBe(true);
+    expect(tokens.some((t) => t.type === "word" && t.value === "grep")).toBe(true);
+  });
+
+  it("tokenizes commands after heredoc on subsequent lines", () => {
+    const tokens = tokenize("cat << EOF\nhello\nEOF\necho done", ENV, 0);
+    const words = tokens.filter((t) => t.type === "word").map((t) => t.value);
+    expect(words).toContain("cat");
+    expect(words).toContain("echo");
+    expect(words).toContain("done");
+  });
+
+  it("handles empty heredoc body", () => {
+    const tokens = tokenize("cat << EOF\nEOF", ENV, 0);
+    const heredoc = tokens.find((t) => t.type === "heredoc");
+    expect(heredoc).toBeDefined();
+    expect(heredoc!.value).toBe("");
+  });
+
+  it("handles double-quoted delimiter", () => {
+    const tokens = tokenize('cat << "EOF"\n$FOO\nEOF', ENV, 0);
+    const heredoc = tokens.find((t) => t.type === "heredoc");
+    expect(heredoc).toBeDefined();
+    expect(heredoc!.value).toBe("$FOO\n"); // quoted = no expansion
+  });
+});
