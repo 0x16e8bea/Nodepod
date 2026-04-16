@@ -28,8 +28,8 @@ export interface ShellCommand {
 /* ------------------------------------------------------------------ */
 
 export interface RedirectNode {
-  type: "write" | "append" | "read" | "stderr-to-stdout";
-  target: string; // file path (empty for 2>&1)
+  type: "write" | "append" | "read" | "heredoc" | "stderr-to-stdout";
+  target: string; // file path, heredoc body, or empty for 2>&1
 }
 
 export interface CommandNode {
@@ -70,6 +70,7 @@ export type TokenType =
   | "redirect-app"  // >>
   | "redirect-in"   // <
   | "redirect-2to1" // 2>&1
+  | "heredoc"       // << DELIM ... DELIM
   | "newline"
   | "eof";
 

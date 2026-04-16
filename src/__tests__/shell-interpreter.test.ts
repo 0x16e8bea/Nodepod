@@ -176,4 +176,66 @@ describe("NodepodShell", () => {
       expect(result.stdout).toBe("a\nb\n");
     });
   });
+
+  describe("heredoc", () => {
+    it("cat << EOF passes body as stdin", async () => {
+      const { shell } = createShell();
+      const result = await shell.exec("cat << EOF\nhello world\nEOF");
+      expect(result.stdout).toBe("hello world\n");
+      expect(result.exitCode).toBe(0);
+    });
+
+    it("writes heredoc body to file via redirect", async () => {
+      const { vol, shell } = createShell();
+      await shell.exec("cat > /file.txt << EOF\nline 1\nline 2\nEOF");
+      expect(vol.readFileSync("/file.txt", "utf8")).toBe("line 1\nline 2\n");
+    });
+
+    it("pipes heredoc through grep", async () => {
+      const { shell } = createShell();
+      const result = await shell.exec(
+        "cat << EOF | grep hello\nhello world\ngoodbye world\nEOF",
+      );
+      // grep adds ANSI color codes — strip them for comparison
+      const plain = result.stdout.replace(/\x1b\[[0-9;]*m/g, "");
+      expect(plain).toContain("hello world");
+      expect(plain).not.toContain("goodbye");
+    });
+
+    it("quoted delimiter prevents variable expansion", async () => {
+      const { shell } = createShell();
+      const result = await shell.exec("cat << 'EOF'\n$HOME\nEOF");
+      expect(result.stdout).toBe("$HOME\n");
+    });
+
+    it("unquoted delimiter expands variables", async () => {
+      const { shell } = createShell();
+      const result = await shell.exec("cat << EOF\n$HOME\nEOF");
+      expect(result.stdout).toBe("/home/user\n");
+    });
+
+    it("<<- strips leading tabs", async () => {
+      const { shell } = createShell();
+      const result = await shell.exec("cat <<-EOF\n\thello\n\tworld\n\tEOF");
+      expect(result.stdout).toBe("hello\nworld\n");
+    });
+
+    it("runs commands after heredoc on subsequent lines", async () => {
+      const { vol, shell } = createShell();
+      const result = await shell.exec(
+        "cat > /script.txt << 'ENDSCRIPT'\nconst x = 1;\nconsole.log(x);\nENDSCRIPT\necho done",
+      );
+      expect(vol.readFileSync("/script.txt", "utf8")).toBe(
+        "const x = 1;\nconsole.log(x);\n",
+      );
+      expect(result.stdout).toContain("done");
+    });
+
+    it("handles empty heredoc body", async () => {
+      const { shell } = createShell();
+      const result = await shell.exec("cat << EOF\nEOF");
+      expect(result.stdout).toBe("");
+      expect(result.exitCode).toBe(0);
+    });
+  });
 });

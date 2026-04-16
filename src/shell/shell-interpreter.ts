@@ -236,6 +236,9 @@ export class NodepodShell {
             };
           }
         }
+        if (r.type === "heredoc") {
+          stdin = r.target;
+        }
       }
     }
 
