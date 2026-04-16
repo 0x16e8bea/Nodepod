@@ -252,8 +252,14 @@ export class Nodepod {
       if (!proc.exited) proc._pushStderr(data);
     });
 
-    handle.on("exit", (exitCode: number) => {
-      if (!proc.exited) proc._finish(exitCode);
+    handle.on("exit", (exitCode: number, stdout?: string, stderr?: string) => {
+      if (!proc.exited) {
+        // Shell builtins send stdout/stderr with the exit message rather than
+        // streaming via separate 'stdout' events. Capture them before finishing.
+        if (stdout) proc._pushStdout(stdout);
+        if (stderr) proc._pushStderr(stderr);
+        proc._finish(exitCode);
+      }
     });
 
     handle.on("worker-error", (message: string) => {
